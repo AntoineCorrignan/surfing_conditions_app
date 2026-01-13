@@ -13,7 +13,6 @@ jobs:
 
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      SURF_SCORE_THRESHOLD: ${{ secrets.SURF_SCORE_THRESHOLD }}
 
     steps:
       - name: Checkout repository
