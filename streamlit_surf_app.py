@@ -156,10 +156,8 @@ df_filtered = df[
 
 
 # -----------------------------------
-# Carte (pydeck) – page principale
+# Classement + carte (pydeck) – page principale
 # -----------------------------------
-
-st.subheader("Carte des spots et scores")
 
 # Dernier score par spot sur la période filtrée
 latest_by_spot = (
@@ -167,6 +165,50 @@ latest_by_spot = (
     .groupby("spot_id")
     .tail(1)
 )
+
+st.subheader("Classement des spots")
+
+if not latest_by_spot.empty:
+    ranking_df = (
+        latest_by_spot.sort_values(
+            ["score", "timestamp"],
+            ascending=[False, True],
+        )
+        .reset_index(drop=True)
+        .copy()
+    )
+    ranking_df.insert(0, "rang", ranking_df.index + 1)
+    ranking_df["timestamp"] = ranking_df["timestamp"].dt.strftime("%d/%m %H:%M")
+
+    st.dataframe(
+        ranking_df[
+            [
+                "rang",
+                "name",
+                "score",
+                "conditions_label",
+                "timestamp",
+            ]
+        ],
+        column_config={
+            "rang": st.column_config.NumberColumn("Rang", width="small"),
+            "name": st.column_config.TextColumn("Spot"),
+            "score": st.column_config.ProgressColumn(
+                "Indice",
+                min_value=0,
+                max_value=100,
+                format="%d",
+            ),
+            "conditions_label": st.column_config.TextColumn("Conditions"),
+            "timestamp": st.column_config.TextColumn("Créneau"),
+        },
+        hide_index=True,
+        use_container_width=True,
+    )
+else:
+    st.info("Aucun spot à classer avec les filtres actuels.")
+
+st.subheader("Carte des spots et scores")
 
 
 def score_to_color(score: int):
