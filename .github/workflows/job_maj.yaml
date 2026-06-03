@@ -41,12 +41,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "requirements-backend.txt"
 
       - name: Install dependencies
         if: steps.schedule-check.outputs.should_run == 'true'
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-backend.txt
 
       - name: Run surf backend
         if: steps.schedule-check.outputs.should_run == 'true'
