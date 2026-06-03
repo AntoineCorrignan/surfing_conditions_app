@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -138,16 +138,46 @@ st.sidebar.header("Filtres")
 score_min = st.sidebar.slider("Score minimum", 0, 100, 0, step=5)
 
 now = datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
-st.sidebar.caption(f"Heure prise en compte : {now:%d/%m/%Y %H:%M}")
+today = now.date()
+last_forecast_day = df["timestamp"].max().date()
+last_selectable_day = max(today, last_forecast_day)
+
+available_days = [
+    (today + timedelta(days=offset))
+    for offset in range((last_selectable_day - today).days + 1)
+]
+
+weekdays_fr = (
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+)
+day_options = {
+    f"{weekdays_fr[day.weekday()]} {day:%d/%m}": day
+    for day in available_days
+}
+selected_day_label = st.sidebar.segmented_control(
+    "Jour",
+    options=list(day_options.keys()),
+    default=list(day_options.keys())[0],
+)
+selected_day = day_options[selected_day_label]
+reference_time = datetime.combine(selected_day, now.time())
+
+st.sidebar.caption(f"Heure prise en compte : {reference_time:%d/%m/%Y %H:%M}")
 
 
 # -----------------------------------
 # Carte + classement – page principale
 # -----------------------------------
 
-# Créneau disponible le plus proche de l'heure actuelle pour chaque spot.
+# Créneau disponible le plus proche de l'heure de référence pour chaque spot.
 current_by_spot = df.copy()
-current_by_spot["time_distance"] = (current_by_spot["timestamp"] - now).abs()
+current_by_spot["time_distance"] = (current_by_spot["timestamp"] - reference_time).abs()
 current_by_spot = (
     current_by_spot.sort_values(["spot_id", "time_distance", "timestamp"])
     .groupby("spot_id")
