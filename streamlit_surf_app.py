@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -6,6 +5,7 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 import pydeck as pdk
 from dotenv import load_dotenv
+from app_config import get_config_value, missing_config_message
 
 # -----------------------------------
 # Configuration / connexion DB
@@ -18,24 +18,10 @@ st.set_page_config(
     layout="wide",
 )
 
-
-def get_config_value(name: str, default: str | None = None) -> str | None:
-    value = os.getenv(name)
-    if value:
-        return value
-    try:
-        return st.secrets.get(name, default)
-    except Exception:
-        return default
-
-
 DATABASE_URL = get_config_value("DATABASE_URL")
 
 if not DATABASE_URL:
-    st.error(
-        "DATABASE_URL est manquant.\n\n"
-        "Vérifie ton fichier .env en local ou les Secrets Streamlit Cloud."
-    )
+    st.error(missing_config_message("DATABASE_URL"))
     st.stop()
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
