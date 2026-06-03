@@ -136,8 +136,8 @@ if df.empty:
             "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
         )
     st.info(
-        "Astuce : backend et Streamlit lisent maintenant le `.env` en priorité "
-        "pour éviter d'utiliser deux `DATABASE_URL` différentes."
+        "Astuce : l'application lit DATABASE_URL depuis le `.env` en local "
+        "ou depuis les Secrets Streamlit Cloud en production."
     )
     st.stop()
 

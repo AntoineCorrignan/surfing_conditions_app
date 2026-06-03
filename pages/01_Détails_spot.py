@@ -56,10 +56,13 @@ def format_gemini_error(error: Exception) -> str:
             "La clé API ou le projet Google associé est suspendu. "
             "Crée une nouvelle clé Gemini dans Google AI Studio, vérifie que "
             "l'API Generative Language est active, puis remplace GEMINI_API_KEY "
-            "dans le fichier `.env`."
+            "dans le `.env` local ou dans les Secrets Streamlit Cloud."
         )
     if "API_KEY_INVALID" in error_text or "API key not valid" in error_text:
-        return "La clé Gemini est invalide. Remplace GEMINI_API_KEY dans le fichier `.env`."
+        return (
+            "La clé Gemini est invalide. Remplace GEMINI_API_KEY dans le `.env` local "
+            "ou dans les Secrets Streamlit Cloud."
+        )
     if "PERMISSION_DENIED" in error_text or "403" in error_text:
         return (
             "Google refuse l'accès Gemini pour cette clé ou ce projet. "
@@ -68,7 +71,7 @@ def format_gemini_error(error: Exception) -> str:
     if "is not found" in error_text or "404" in error_text:
         return (
             "Le modèle Gemini configuré n'est pas disponible pour cette clé. "
-            "Vérifie GEMINI_MODEL dans `.env` ou utilise `gemini-2.5-flash`."
+            "Vérifie GEMINI_MODEL dans le `.env` local ou dans les Secrets Streamlit Cloud."
         )
     return "Gemini n'est pas disponible pour le moment. Vérifie la configuration de GEMINI_API_KEY."
 
@@ -83,7 +86,7 @@ if GEMINI_API_KEY:
 else:
     gemini_unavailable_reason = (
         "GEMINI_API_KEY manquant : le résumé avec Gemini ne pourra pas être généré.\n"
-        "Ajoute ta clé dans le fichier .env."
+        "Ajoute ta clé dans le `.env` local ou dans les Secrets Streamlit Cloud."
     )
 
 
@@ -178,8 +181,8 @@ if df.empty:
             "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
         )
     st.info(
-        "Astuce : backend et Streamlit lisent maintenant le `.env` en priorité "
-        "pour éviter d'utiliser deux `DATABASE_URL` différentes."
+        "Astuce : l'application lit DATABASE_URL depuis le `.env` en local "
+        "ou depuis les Secrets Streamlit Cloud en production."
     )
     st.stop()
 
