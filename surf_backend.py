@@ -14,7 +14,7 @@ from sqlalchemy import (
 # Configuration
 # ---------------------------
 
-load_dotenv()
+load_dotenv(override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -42,6 +42,11 @@ SPOTS = [
         "name": "La Tranche-sur-Mer (La Terrière)",
         "latitude": 46.3441,
         "longitude": -1.4388,
+    },
+    {
+        "name": "Vendays-Montalivet",
+        "latitude": 45.3567,
+        "longitude": -1.0617,
     },
 ]
 
@@ -124,6 +129,29 @@ def init_db():
                     "lon": spot["longitude"],
                 },
             )
+
+
+def load_spots_from_db() -> List[Dict[str, Any]]:
+    """Charge tous les spots configurés en base."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT name, latitude, longitude
+                FROM surf_spots
+                ORDER BY name
+                """
+            )
+        ).mappings().all()
+
+    return [
+        {
+            "name": row["name"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------
@@ -299,7 +327,7 @@ def score_wind(speed: float, direction_deg: float) -> float:
 def score_tide_placeholder() -> float:
     """
     Placeholder marée : pour l'instant 0.5 constant.
-    À remplacer plus tard par un vrai calcul utilisant l'API SHOM.
+    À remplacer plus tard par un vrai calcul de marée.
     """
     return 0.5
 
@@ -375,7 +403,8 @@ def save_forecasts_and_scores(forecasts: List[SurfForecast]):
                         wave_period_s = EXCLUDED.wave_period_s,
                         wave_direction_deg = EXCLUDED.wave_direction_deg,
                         wind_speed_ms = EXCLUDED.wind_speed_ms,
-                        wind_direction_deg = EXCLUDED.wind_direction_deg
+                        wind_direction_deg = EXCLUDED.wind_direction_deg,
+                        created_at = NOW()
                     """
                 ),
                 {
@@ -401,7 +430,8 @@ def save_forecasts_and_scores(forecasts: List[SurfForecast]):
                     VALUES (:spot_id, :ts, :score, :label)
                     ON CONFLICT (spot_id, timestamp) DO UPDATE
                     SET score = EXCLUDED.score,
-                        conditions_label = EXCLUDED.conditions_label
+                        conditions_label = EXCLUDED.conditions_label,
+                        created_at = NOW()
                     """
                 ),
                 {
@@ -456,8 +486,10 @@ def notify_good_sessions(threshold: int = SURF_SCORE_THRESHOLD):
 def run_pipeline_once():
     print("Initialisation DB...")
     init_db()
+    spots = load_spots_from_db()
+    print(f"{len(spots)} spots configurés.")
     print("Récupération prévisions...")
-    forecasts = fetch_marine_and_wind(SPOTS)
+    forecasts = fetch_marine_and_wind(spots)
     print(f"{len(forecasts)} enregistrements météo récupérés.")
     print("Sauvegarde en base + calcul des scores...")
     save_forecasts_and_scores(forecasts)

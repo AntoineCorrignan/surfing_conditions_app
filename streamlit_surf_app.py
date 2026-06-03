@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 # Configuration / connexion DB
 # -----------------------------------
 
-load_dotenv()
+load_dotenv(override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -84,14 +84,49 @@ def load_latest_scores():
     return df
 
 
+@st.cache_data(ttl=600)
+def load_database_status():
+    with engine.begin() as conn:
+        return conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) AS rows_count,
+                    MIN(sc.timestamp) AS first_timestamp,
+                    MAX(sc.timestamp) AS last_timestamp,
+                    MAX(sc.created_at) AS last_refresh
+                FROM surf_scores sc
+                """
+            )
+        ).mappings().one()
+
+
 df = load_latest_scores()
 
 st.title("Surf Monitor – Loire-Atlantique & Vendée (débutant)")
 
 if df.empty:
+    db_status = load_database_status()
+    if db_status["rows_count"]:
+        first_ts = pd.to_datetime(db_status["first_timestamp"], utc=True).tz_convert("Europe/Paris")
+        last_ts = pd.to_datetime(db_status["last_timestamp"], utc=True).tz_convert("Europe/Paris")
+        refreshed_at = pd.to_datetime(db_status["last_refresh"], utc=True).tz_convert("Europe/Paris")
+        st.info(
+            "Aucune donnée dans la fenêtre actuelle (-24h / +72h).\n\n"
+            f"La base contient {db_status['rows_count']} scores, de "
+            f"{first_ts:%d/%m/%Y %H:%M} à {last_ts:%d/%m/%Y %H:%M} "
+            f"(dernier rafraîchissement : {refreshed_at:%d/%m/%Y %H:%M}).\n\n"
+            "Relance `python surf_backend.py`, puis clique sur Rerun dans Streamlit "
+            "si le cache affiche encore l'ancien résultat."
+        )
+    else:
+        st.info(
+            "Aucune donnée en base pour l'instant.\n\n"
+            "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
+        )
     st.info(
-        "Aucune donnée en base pour l'instant.\n\n"
-        "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
+        "Astuce : backend et Streamlit lisent maintenant le `.env` en priorité "
+        "pour éviter d'utiliser deux `DATABASE_URL` différentes."
     )
     st.stop()
 
@@ -102,7 +137,7 @@ if df.empty:
 
 st.sidebar.header("Filtres")
 
-score_min = st.sidebar.slider("Score minimum", 0, 100, 60, step=5)
+score_min = st.sidebar.slider("Score minimum", 0, 100, 0, step=5)
 
 now = datetime.now()
 date_min = now - timedelta(hours=3)

@@ -11,10 +11,18 @@ import google.generativeai as genai
 # Configuration / connexion DB + Gemini
 # -----------------------------------
 
-load_dotenv()
+load_dotenv(override=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    GEMINI_API_KEY = GEMINI_API_KEY.strip()
+
+st.set_page_config(
+    page_title="Détails spot",
+    layout="wide",
+)
 
 if not DATABASE_URL:
     st.error(
@@ -27,44 +35,43 @@ engine = create_engine(DATABASE_URL, echo=False, future=True)
 
 gemini_model = None
 model_name_used = None
+gemini_unavailable_reason = None
 
-if GOOGLE_API_KEY:
+
+def format_gemini_error(error: Exception) -> str:
+    error_text = str(error)
+    if "CONSUMER_SUSPENDED" in error_text or "has been suspended" in error_text:
+        return (
+            "La clé API ou le projet Google associé est suspendu. "
+            "Crée une nouvelle clé Gemini dans Google AI Studio, vérifie que "
+            "l'API Generative Language est active, puis remplace GEMINI_API_KEY "
+            "dans le fichier `.env`."
+        )
+    if "API_KEY_INVALID" in error_text or "API key not valid" in error_text:
+        return "La clé Gemini est invalide. Remplace GEMINI_API_KEY dans le fichier `.env`."
+    if "PERMISSION_DENIED" in error_text or "403" in error_text:
+        return (
+            "Google refuse l'accès Gemini pour cette clé ou ce projet. "
+            "Vérifie la clé, le projet Google et l'activation de l'API Generative Language."
+        )
+    if "is not found" in error_text or "404" in error_text:
+        return (
+            "Le modèle Gemini configuré n'est pas disponible pour cette clé. "
+            "Vérifie GEMINI_MODEL dans `.env` ou utilise `gemini-2.5-flash`."
+        )
+    return "Gemini n'est pas disponible pour le moment. Vérifie la configuration de GEMINI_API_KEY."
+
+if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-
-        # Récupérer les modèles et filtrer ceux qui supportent generateContent
-        available_models = list(genai.list_models())
-        text_models = [
-            m for m in available_models
-            if hasattr(m, "supported_generation_methods")
-            and "generateContent" in m.supported_generation_methods
-        ]
-
-        if not text_models:
-            st.warning(
-                "Aucun modèle Gemini ne supporte generateContent sur ce compte/projet.\n"
-                "Vérifie ta configuration Google AI Studio."
-            )
-        else:
-            # On essaie de privilégier un modèle 1.5 (flash ou pro), sinon le premier.
-            preferred = None
-            for m in text_models:
-                # m.name est du type "models/gemini-1.5-flash" ou "models/gemini-1.0-pro"
-                if "1.5" in m.name:
-                    preferred = m
-                    break
-            if preferred is None:
-                preferred = text_models[0]
-
-            model_name_used = preferred.name  # ex: "models/gemini-1.5-flash"
-            gemini_model = genai.GenerativeModel(model_name_used)
-
+        genai.configure(api_key=GEMINI_API_KEY)
+        model_name_used = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+        gemini_model = genai.GenerativeModel(model_name_used)
     except Exception as e:
         gemini_model = None
-        st.warning(f"Erreur de configuration Gemini : {e}")
+        gemini_unavailable_reason = format_gemini_error(e)
 else:
-    st.warning(
-        "GOOGLE_API_KEY manquant : le résumé avec Gemini ne pourra pas être généré.\n"
+    gemini_unavailable_reason = (
+        "GEMINI_API_KEY manquant : le résumé avec Gemini ne pourra pas être généré.\n"
         "Ajoute ta clé dans le fichier .env."
     )
 
@@ -119,14 +126,49 @@ def load_scores_with_forecast():
     return df
 
 
+@st.cache_data(ttl=600)
+def load_database_status():
+    with engine.begin() as conn:
+        return conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) AS rows_count,
+                    MIN(sc.timestamp) AS first_timestamp,
+                    MAX(sc.timestamp) AS last_timestamp,
+                    MAX(sc.created_at) AS last_refresh
+                FROM surf_scores sc
+                """
+            )
+        ).mappings().one()
+
+
 df = load_scores_with_forecast()
 
 st.title("Détails d’un spot – Surf Monitor")
 
 if df.empty:
+    db_status = load_database_status()
+    if db_status["rows_count"]:
+        first_ts = pd.to_datetime(db_status["first_timestamp"], utc=True).tz_convert("Europe/Paris")
+        last_ts = pd.to_datetime(db_status["last_timestamp"], utc=True).tz_convert("Europe/Paris")
+        refreshed_at = pd.to_datetime(db_status["last_refresh"], utc=True).tz_convert("Europe/Paris")
+        st.info(
+            "Aucune donnée dans la fenêtre actuelle (-24h / +72h).\n\n"
+            f"La base contient {db_status['rows_count']} scores, de "
+            f"{first_ts:%d/%m/%Y %H:%M} à {last_ts:%d/%m/%Y %H:%M} "
+            f"(dernier rafraîchissement : {refreshed_at:%d/%m/%Y %H:%M}).\n\n"
+            "Relance `python surf_backend.py`, puis clique sur Rerun dans Streamlit "
+            "si le cache affiche encore l'ancien résultat."
+        )
+    else:
+        st.info(
+            "Aucune donnée en base pour l'instant.\n\n"
+            "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
+        )
     st.info(
-        "Aucune donnée en base pour l'instant.\n\n"
-        "Lance d'abord le script backend (surf_backend.py) pour alimenter Neon."
+        "Astuce : backend et Streamlit lisent maintenant le `.env` en priorité "
+        "pour éviter d'utiliser deux `DATABASE_URL` différentes."
     )
     st.stop()
 
@@ -159,7 +201,6 @@ df_spot = df[
 if df_spot.empty:
     st.info("Pas de données pour ce spot sur cette période.")
     st.stop()
-
 
 # -----------------------------------
 # Construction du prompt pour Gemini
@@ -210,6 +251,13 @@ Donne UNIQUEMENT le texte du résumé, sans autre commentaire, sans puces.
     return prompt.strip()
 
 
+@st.cache_data(ttl=3600)
+def generate_gemini_summary(model_name: str, prompt: str) -> str:
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content(prompt)
+    return response.text
+
+
 # -----------------------------------
 # Résumé avec Gemini
 # -----------------------------------
@@ -217,10 +265,7 @@ Donne UNIQUEMENT le texte du résumé, sans autre commentaire, sans puces.
 st.subheader(f"Résumé des conditions – {spot_selected}")
 
 if gemini_model is None:
-    st.info(
-        "Aucun modèle Gemini n'est configuré correctement.\n"
-        "Vérifie GOOGLE_API_KEY et les modèles disponibles dans Google AI Studio."
-    )
+    st.info(gemini_unavailable_reason)
 else:
     if model_name_used:
         st.caption(f"Modèle utilisé : {model_name_used}")
@@ -229,10 +274,9 @@ else:
         prompt = build_summary_prompt(spot_selected, df_spot)
 
         try:
-            response = gemini_model.generate_content(prompt)
-            summary_text = response.text
+            summary_text = generate_gemini_summary(model_name_used, prompt)
         except Exception as e:
-            summary_text = f"Erreur lors de l'appel à Gemini : {e}"
+            summary_text = format_gemini_error(e)
 
     st.write(summary_text)
 
