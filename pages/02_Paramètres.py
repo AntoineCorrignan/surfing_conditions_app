@@ -15,7 +15,6 @@ from sqlalchemy import create_engine, text
 
 load_dotenv(override=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
 APP_DIR = Path(__file__).resolve().parents[1]
 BACKEND_SCRIPT = APP_DIR / "surf_backend.py"
 
@@ -24,10 +23,23 @@ st.set_page_config(
     layout="wide",
 )
 
+
+def get_config_value(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
+DATABASE_URL = get_config_value("DATABASE_URL")
+
 if not DATABASE_URL:
     st.error(
         "DATABASE_URL est manquant.\n\n"
-        "Vérifie ton fichier .env (DATABASE_URL)."
+        "Vérifie ton fichier .env en local ou les Secrets Streamlit Cloud."
     )
     st.stop()
 
@@ -87,9 +99,13 @@ def add_spot(name: str, latitude: float, longitude: float):
 
 
 def run_backend_update():
+    env = os.environ.copy()
+    env["DATABASE_URL"] = DATABASE_URL
+
     return subprocess.run(
         [sys.executable, str(BACKEND_SCRIPT)],
         cwd=str(APP_DIR),
+        env=env,
         capture_output=True,
         text=True,
         timeout=240,

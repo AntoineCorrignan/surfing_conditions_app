@@ -13,21 +13,32 @@ import google.generativeai as genai
 
 load_dotenv(override=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if GEMINI_API_KEY:
-    GEMINI_API_KEY = GEMINI_API_KEY.strip()
-
 st.set_page_config(
     page_title="Détails spot",
     layout="wide",
 )
 
+
+def get_config_value(name: str, default: str | None = None) -> str | None:
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
+DATABASE_URL = get_config_value("DATABASE_URL")
+GEMINI_API_KEY = get_config_value("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    GEMINI_API_KEY = GEMINI_API_KEY.strip()
+
 if not DATABASE_URL:
     st.error(
         "DATABASE_URL est manquant.\n\n"
-        "Vérifie ton fichier .env (DATABASE_URL)."
+        "Vérifie ton fichier .env en local ou les Secrets Streamlit Cloud."
     )
     st.stop()
 
@@ -64,7 +75,7 @@ def format_gemini_error(error: Exception) -> str:
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model_name_used = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+        model_name_used = get_config_value("GEMINI_MODEL", "gemini-2.5-flash").strip()
         gemini_model = genai.GenerativeModel(model_name_used)
     except Exception as e:
         gemini_model = None
