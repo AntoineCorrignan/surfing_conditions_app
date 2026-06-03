@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -136,35 +137,23 @@ st.sidebar.header("Filtres")
 
 score_min = st.sidebar.slider("Score minimum", 0, 100, 0, step=5)
 
-now = datetime.now()
-date_min = now - timedelta(hours=3)
-date_max = now + timedelta(days=3)
-
-start_time, end_time = st.sidebar.slider(
-    "Fenêtre temporelle",
-    min_value=date_min,
-    max_value=date_max,
-    value=(date_min, date_max),
-    format="DD/MM HH:mm",
-)
-
-df_filtered = df[
-    (df["timestamp"] >= start_time)
-    & (df["timestamp"] <= end_time)
-    & (df["score"] >= score_min)
-]
+now = datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
+st.sidebar.caption(f"Heure prise en compte : {now:%d/%m/%Y %H:%M}")
 
 
 # -----------------------------------
 # Carte + classement – page principale
 # -----------------------------------
 
-# Dernier score par spot sur la période filtrée
-latest_by_spot = (
-    df_filtered.sort_values("timestamp")
+# Créneau disponible le plus proche de l'heure actuelle pour chaque spot.
+current_by_spot = df.copy()
+current_by_spot["time_distance"] = (current_by_spot["timestamp"] - now).abs()
+current_by_spot = (
+    current_by_spot.sort_values(["spot_id", "time_distance", "timestamp"])
     .groupby("spot_id")
-    .tail(1)
+    .head(1)
 )
+current_by_spot = current_by_spot[current_by_spot["score"] >= score_min]
 
 st.subheader("Carte des spots et scores")
 
@@ -178,20 +167,20 @@ def score_to_color(score: int):
         return [200, 0, 0]      # rouge
 
 
-if not latest_by_spot.empty:
-    latest_by_spot = latest_by_spot.copy()
-    latest_by_spot["color"] = latest_by_spot["score"].apply(score_to_color)
+if not current_by_spot.empty:
+    current_by_spot = current_by_spot.copy()
+    current_by_spot["color"] = current_by_spot["score"].apply(score_to_color)
 
     view_state = pdk.ViewState(
-        latitude=latest_by_spot["latitude"].mean(),
-        longitude=latest_by_spot["longitude"].mean(),
+        latitude=current_by_spot["latitude"].mean(),
+        longitude=current_by_spot["longitude"].mean(),
         zoom=7,
         pitch=0,
     )
 
     layer = pdk.Layer(
         "ScatterplotLayer",
-        data=latest_by_spot,
+        data=current_by_spot,
         get_position="[longitude, latitude]",
         get_radius=15000,
         get_fill_color="color",
@@ -225,13 +214,13 @@ if not latest_by_spot.empty:
         )
     )
 else:
-    st.info("Aucun créneau au-dessus du score minimum sur la période sélectionnée.")
+    st.info("Aucun spot au-dessus du score minimum pour le créneau actuel.")
 
 st.subheader("Classement des spots")
 
-if not latest_by_spot.empty:
+if not current_by_spot.empty:
     ranking_df = (
-        latest_by_spot.sort_values(
+        current_by_spot.sort_values(
             ["score", "timestamp"],
             ascending=[False, True],
         )
