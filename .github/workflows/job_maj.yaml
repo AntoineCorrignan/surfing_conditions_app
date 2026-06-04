@@ -4,7 +4,10 @@ on:
   schedule:
     # GitHub Actions utilise UTC. Ces quatre horaires couvrent minuit et midi
     # en Europe/Paris, en heure d'été comme en heure d'hiver.
-    - cron: "0 10,11,22,23 * * *"
+    - cron: "0 10 * * *"
+    - cron: "0 11 * * *"
+    - cron: "0 22 * * *"
+    - cron: "0 23 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -24,12 +27,22 @@ jobs:
             exit 0
           fi
 
-          paris_hour="$(TZ=Europe/Paris date +%H)"
-          if [ "$paris_hour" = "00" ] || [ "$paris_hour" = "12" ]; then
+          scheduled_cron="${{ github.event.schedule }}"
+          scheduled_hour="$(echo "$scheduled_cron" | awk '{print $2}')"
+          paris_offset="$(TZ=Europe/Paris date +%z)"
+
+          if [ "$paris_offset" = "+0200" ]; then
+            valid_hours="10 22"
+          else
+            valid_hours="11 23"
+          fi
+
+          if [[ " $valid_hours " == *" $scheduled_hour "* ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Running scheduled cron '$scheduled_cron' for Europe/Paris offset $paris_offset."
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping run: current Europe/Paris hour is $paris_hour."
+            echo "Skipping scheduled cron '$scheduled_cron' for Europe/Paris offset $paris_offset."
           fi
 
       - name: Checkout repository
