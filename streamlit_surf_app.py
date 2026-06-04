@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -36,7 +36,7 @@ engine = create_engine(DATABASE_URL, echo=False, future=True)
 def load_latest_scores():
     """
     Charge les scores + données météo associées (jointure forecast + score).
-    Fenêtre : -24h / +72h.
+    Fenêtre : depuis les dernières 24h jusqu'à toutes les prévisions futures chargées.
     """
     with engine.begin() as conn:
         rows = conn.execute(
@@ -61,7 +61,6 @@ def load_latest_scores():
                   ON f.spot_id = sc.spot_id
                  AND f.timestamp = sc.timestamp
                 WHERE sc.timestamp >= NOW() - INTERVAL '24 hours'
-                  AND sc.timestamp < NOW() + INTERVAL '72 hours'
                 ORDER BY sc.timestamp
                 """
             )
@@ -139,13 +138,15 @@ score_min = st.sidebar.slider("Score minimum", 0, 100, 0, step=5)
 
 now = datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
 today = now.date()
-last_forecast_day = df["timestamp"].max().date()
-last_selectable_day = max(today, last_forecast_day)
+available_days = sorted(
+    day
+    for day in df["timestamp"].dt.date.unique()
+    if day >= today
+)
 
-available_days = [
-    (today + timedelta(days=offset))
-    for offset in range((last_selectable_day - today).days + 1)
-]
+if not available_days:
+    st.info("Aucune prévision à venir n'est disponible dans les données chargées.")
+    st.stop()
 
 weekdays_fr = (
     "lundi",
@@ -176,7 +177,8 @@ st.sidebar.caption(f"Heure prise en compte : {reference_time:%d/%m/%Y %H:%M}")
 # -----------------------------------
 
 # Créneau disponible le plus proche de l'heure de référence pour chaque spot.
-current_by_spot = df.copy()
+df_selected_day = df[df["timestamp"].dt.date == selected_day].copy()
+current_by_spot = df_selected_day.copy()
 current_by_spot["time_distance"] = (current_by_spot["timestamp"] - reference_time).abs()
 current_by_spot = (
     current_by_spot.sort_values(["spot_id", "time_distance", "timestamp"])
