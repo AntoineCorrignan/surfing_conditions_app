@@ -124,14 +124,14 @@ with st.form("add_spot_form", clear_on_submit=True):
         "Latitude",
         min_value=-90.0,
         max_value=90.0,
-        value=47.0,
+        value=0.0,
         format="%.6f",
     )
     longitude = col_lon.number_input(
         "Longitude",
         min_value=-180.0,
         max_value=180.0,
-        value=-2.0,
+        value=-0.0,
         format="%.6f",
     )
     submitted = st.form_submit_button("Enregistrer le spot")
