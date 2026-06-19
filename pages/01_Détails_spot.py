@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -6,6 +7,7 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import google.generativeai as genai
 from app_config import get_config_value, missing_config_message
+from db_schema import ensure_tide_forecast_columns
 
 # -----------------------------------
 # Configuration / connexion DB + Gemini
@@ -29,6 +31,7 @@ if not DATABASE_URL:
     st.stop()
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
+ensure_tide_forecast_columns(engine)
 
 gemini_model = None
 model_name_used = None
@@ -98,7 +101,14 @@ def load_scores_with_forecast():
                     f.wave_period_s,
                     f.wave_direction_deg,
                     f.wind_speed_ms,
-                    f.wind_direction_deg
+                    f.wind_direction_deg,
+                    f.tide_height_m,
+                    f.tide_state,
+                    f.next_tide_type,
+                    f.next_tide_time,
+                    f.next_tide_height_m,
+                    f.tide_coefficient,
+                    f.minutes_to_next_tide
                 FROM surf_scores sc
                 JOIN surf_spots sp ON sp.id = sc.spot_id
                 JOIN surf_forecasts f
@@ -122,6 +132,12 @@ def load_scores_with_forecast():
         .dt.tz_convert("Europe/Paris")
         .dt.tz_localize(None)
     )
+    if "next_tide_time" in df and df["next_tide_time"].notna().any():
+        df["next_tide_time"] = (
+            pd.to_datetime(df["next_tide_time"], utc=True)
+            .dt.tz_convert("Europe/Paris")
+            .dt.tz_localize(None)
+        )
 
     return df
 
@@ -174,39 +190,151 @@ if df.empty:
 
 
 # -----------------------------------
-# Sélection du spot + fenêtre temporelle
+# Sélection du spot + créneaux temporels
 # -----------------------------------
 
 spots = df["name"].unique().tolist()
 spot_selected = st.selectbox("Choisis un spot", spots)
 
-now = datetime.now()
-date_min = now - timedelta(hours=3)
-date_max = now + timedelta(days=3)
+now = datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
+today = now.date()
 
-start_time, end_time = st.slider(
-    "Fenêtre temporelle",
-    min_value=date_min,
-    max_value=date_max,
-    value=(date_min, date_max),
-    format="DD/MM HH:mm",
+weekdays_fr = (
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+)
+time_slots = [
+    ("8h-11h", 8, 11),
+    ("11h-14h", 11, 14),
+    ("14h-17h", 14, 17),
+    ("17h-20h", 17, 20),
+    ("20h-23h", 20, 23),
+]
+
+df_selected_spot = df[df["name"] == spot_selected].copy()
+available_days = sorted(
+    day
+    for day in df_selected_spot["timestamp"].dt.date.unique()
+    if day >= today
 )
 
-df_spot = df[
-    (df["name"] == spot_selected)
-    & (df["timestamp"] >= start_time)
-    & (df["timestamp"] <= end_time)
-].sort_values("timestamp")
+slot_options = []
+for day in available_days:
+    for label, start_hour, end_hour in time_slots:
+        start = datetime.combine(day, datetime.min.time()).replace(hour=start_hour)
+        end = datetime.combine(day, datetime.min.time()).replace(hour=end_hour)
+        has_data = (
+            (df_selected_spot["timestamp"] >= start)
+            & (df_selected_spot["timestamp"] < end)
+        ).any()
+        if not has_data or (day == today and end <= now):
+            continue
+        slot_options.append(
+            {
+                "label": f"{weekdays_fr[day.weekday()]} {day:%d/%m} · {label}",
+                "start": start,
+                "end": end,
+            }
+        )
+
+if not slot_options:
+    st.info("Pas de créneau disponible pour ce spot.")
+    st.stop()
+
+default_slot_labels = [slot_options[0]["label"]]
+for option in slot_options:
+    if option["start"] <= now < option["end"]:
+        default_slot_labels = [option["label"]]
+        break
+
+selected_slot_labels = st.pills(
+    "Jours et créneaux",
+    options=[option["label"] for option in slot_options],
+    default=default_slot_labels,
+    selection_mode="multi",
+)
+if not selected_slot_labels:
+    st.info("Sélectionne au moins un créneau pour afficher les détails.")
+    st.stop()
+
+selected_slots = [
+    option for option in slot_options if option["label"] in selected_slot_labels
+]
+slot_mask = pd.Series(False, index=df_selected_spot.index)
+for option in selected_slots:
+    slot_mask = slot_mask | (
+        (df_selected_spot["timestamp"] >= option["start"])
+        & (df_selected_spot["timestamp"] < option["end"])
+    )
+
+df_spot = df_selected_spot[slot_mask].sort_values("timestamp")
 
 if df_spot.empty:
-    st.info("Pas de données pour ce spot sur cette période.")
+    st.info("Pas de données pour ce spot sur ces créneaux.")
     st.stop()
+
+slot_summary_rows = []
+incomplete_slot_labels = []
+for option in selected_slots:
+    df_slot = df_selected_spot[
+        (df_selected_spot["timestamp"] >= option["start"])
+        & (df_selected_spot["timestamp"] < option["end"])
+    ].copy()
+    expected_hours = int((option["end"] - option["start"]).total_seconds() // 3600)
+    observed_hours = df_slot["timestamp"].nunique()
+    if observed_hours < expected_hours:
+        incomplete_slot_labels.append(
+            f"{option['label']} ({observed_hours}/{expected_hours} heures)"
+        )
+    if df_slot.empty:
+        continue
+    slot_summary_rows.append(
+        {
+            "créneau": option["label"],
+            "début": option["start"],
+            "fin": option["end"],
+            "heures_disponibles": observed_hours,
+            "heures_attendues": expected_hours,
+            "score_moyen": round(df_slot["score"].mean(), 1),
+            "score_min": int(df_slot["score"].min()),
+            "score_max": int(df_slot["score"].max()),
+            "houle_moyenne_m": round(df_slot["wave_height_m"].mean(), 2),
+            "période_moyenne_s": round(df_slot["wave_period_s"].mean(), 1),
+            "vent_moyen_ms": round(df_slot["wind_speed_ms"].mean(), 1),
+            "marée": " → ".join(
+                state for state in df_slot["tide_state"].dropna().astype(str).unique()
+            ),
+            "coefficient_moyen": (
+                round(df_slot["tide_coefficient"].dropna().mean(), 0)
+                if df_slot["tide_coefficient"].notna().any()
+                else None
+            ),
+        }
+    )
+
+slot_summary_df = pd.DataFrame(slot_summary_rows)
+
+if incomplete_slot_labels:
+    st.warning(
+        "Données horaires incomplètes pour : "
+        + ", ".join(incomplete_slot_labels)
+        + ". Relance `python surf_backend.py` pour remplir la base avec les prévisions heure par heure."
+    )
 
 # -----------------------------------
 # Construction du prompt pour Gemini
 # -----------------------------------
 
-def build_summary_prompt(spot_name: str, df_for_prompt: pd.DataFrame) -> str:
+def build_summary_prompt(
+    spot_name: str,
+    df_for_prompt: pd.DataFrame,
+    slot_summary_for_prompt: pd.DataFrame,
+) -> str:
     """
     Prompt en français, orienté débutant, basé sur les données du spot.
     On réduit les colonnes et le nombre de lignes pour garder le prompt compact.
@@ -220,6 +348,13 @@ def build_summary_prompt(spot_name: str, df_for_prompt: pd.DataFrame) -> str:
             "wave_period_s",
             "wind_speed_ms",
             "wind_direction_deg",
+            "tide_height_m",
+            "tide_state",
+            "next_tide_type",
+            "next_tide_time",
+            "next_tide_height_m",
+            "tide_coefficient",
+            "minutes_to_next_tide",
         ]
     ].copy()
 
@@ -227,6 +362,11 @@ def build_summary_prompt(spot_name: str, df_for_prompt: pd.DataFrame) -> str:
     df_small = df_small.head(40)
 
     csv_data = df_small.to_csv(index=False)
+    slot_summary_csv = slot_summary_for_prompt.to_csv(index=False)
+    selected_period = (
+        f"{df_small['timestamp'].min():%d/%m %H:%M} à "
+        f"{df_small['timestamp'].max():%d/%m %H:%M}"
+    )
 
     prompt = f"""
 Tu es un expert des prévisions de surf.
@@ -235,15 +375,24 @@ Rédige un résumé en français, concis (5 à 10 lignes max), pour un surfeur d
 qui habite en Loire-Atlantique et hésite à aller surfer au spot suivant :
 
 Spot : {spot_name}
+Période analysée : {selected_period}
 
 Tu dois :
-- décrire globalement les conditions sur la période (score, houle, vent),
+- décrire globalement les conditions sur toute la période sélectionnée (score, houle, vent),
 - indiquer les créneaux horaires les plus intéressants (scores les plus élevés),
+- tenir compte de la marée (hauteur, marée montante/descendante, prochaine PM/BM, coefficient),
 - signaler s'il faut être prudent (vent fort, houle longue, etc.),
 - rester clair, pédagogique et concret.
 
-Voici les données au format CSV (chaque ligne = un créneau horaire) :
+Voici les données au format CSV.
+Chaque ligne est une prévision horaire comprise dans les boutons jour/créneau sélectionnés.
+Pour juger un créneau comme 8h-11h, utilise toutes les lignes entre 8h inclus et 11h exclu,
+pas seulement l'heure de début.
 
+Résumé agrégé par créneau sélectionné :
+{slot_summary_csv}
+
+Détail horaire :
 {csv_data}
 
 Donne UNIQUEMENT le texte du résumé, sans autre commentaire, sans puces.
@@ -270,15 +419,18 @@ else:
     if model_name_used:
         st.caption(f"Modèle utilisé : {model_name_used}")
 
-    with st.spinner("Génération du résumé avec Gemini..."):
-        prompt = build_summary_prompt(spot_selected, df_spot)
+    if st.button("Générer résumé", type="primary"):
+        with st.spinner("Génération du résumé avec Gemini..."):
+            prompt = build_summary_prompt(spot_selected, df_spot, slot_summary_df)
 
-        try:
-            summary_text = generate_gemini_summary(model_name_used, prompt)
-        except Exception as e:
-            summary_text = format_gemini_error(e)
+            try:
+                summary_text = generate_gemini_summary(model_name_used, prompt)
+            except Exception as e:
+                summary_text = format_gemini_error(e)
 
-    st.write(summary_text)
+        st.write(summary_text)
+    else:
+        st.info("Clique sur « Générer résumé » pour interroger Gemini avec les créneaux sélectionnés.")
 
 
 # -----------------------------------
@@ -289,6 +441,33 @@ st.subheader("Timeline des scores")
 
 df_plot = df_spot.set_index("timestamp")[["score"]]
 st.line_chart(df_plot)
+
+
+# -----------------------------------
+# Résumé agrégé
+# -----------------------------------
+
+st.subheader("Résumé par créneau")
+
+st.dataframe(
+    slot_summary_df[
+        [
+            "créneau",
+            "heures_disponibles",
+            "heures_attendues",
+            "score_moyen",
+            "score_min",
+            "score_max",
+            "houle_moyenne_m",
+            "période_moyenne_s",
+            "vent_moyen_ms",
+            "marée",
+            "coefficient_moyen",
+        ]
+    ],
+    use_container_width=True,
+    hide_index=True,
+)
 
 
 # -----------------------------------
@@ -308,6 +487,13 @@ st.dataframe(
             "wave_direction_deg",
             "wind_speed_ms",
             "wind_direction_deg",
+            "tide_height_m",
+            "tide_state",
+            "next_tide_type",
+            "next_tide_time",
+            "next_tide_height_m",
+            "tide_coefficient",
+            "minutes_to_next_tide",
         ]
     ],
     use_container_width=True,

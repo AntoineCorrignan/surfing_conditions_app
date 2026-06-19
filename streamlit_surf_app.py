@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, text
 import pydeck as pdk
 from dotenv import load_dotenv
 from app_config import get_config_value, missing_config_message
+from db_schema import ensure_tide_forecast_columns
 
 # -----------------------------------
 # Configuration / connexion DB
@@ -26,6 +27,7 @@ if not DATABASE_URL:
     st.stop()
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
+ensure_tide_forecast_columns(engine)
 
 
 # -----------------------------------
@@ -54,7 +56,14 @@ def load_latest_scores():
                     f.wave_period_s,
                     f.wave_direction_deg,
                     f.wind_speed_ms,
-                    f.wind_direction_deg
+                    f.wind_direction_deg,
+                    f.tide_height_m,
+                    f.tide_state,
+                    f.next_tide_type,
+                    f.next_tide_time,
+                    f.next_tide_height_m,
+                    f.tide_coefficient,
+                    f.minutes_to_next_tide
                 FROM surf_scores sc
                 JOIN surf_spots sp ON sp.id = sc.spot_id
                 JOIN surf_forecasts f
@@ -77,6 +86,12 @@ def load_latest_scores():
         .dt.tz_convert("Europe/Paris")
         .dt.tz_localize(None)
     )
+    if "next_tide_time" in df and df["next_tide_time"].notna().any():
+        df["next_tide_time"] = (
+            pd.to_datetime(df["next_tide_time"], utc=True)
+            .dt.tz_convert("Europe/Paris")
+            .dt.tz_localize(None)
+        )
 
     return df
 
@@ -157,31 +172,73 @@ weekdays_fr = (
     "samedi",
     "dimanche",
 )
-day_options = {
-    f"{weekdays_fr[day.weekday()]} {day:%d/%m}": day
-    for day in available_days
-}
-selected_day_label = st.sidebar.segmented_control(
-    "Jour",
-    options=list(day_options.keys()),
-    default=list(day_options.keys())[0],
-)
-selected_day = day_options[selected_day_label]
-reference_time = datetime.combine(selected_day, now.time())
+time_slots = [
+    ("8h-11h", 8, 11),
+    ("11h-14h", 11, 14),
+    ("14h-17h", 14, 17),
+    ("17h-20h", 17, 20),
+    ("20h-23h", 20, 23),
+]
 
-st.sidebar.caption(f"Heure prise en compte : {reference_time:%d/%m/%Y %H:%M}")
+slot_options = []
+for day in available_days:
+    for label, start_hour, end_hour in time_slots:
+        start = datetime.combine(day, datetime.min.time()).replace(hour=start_hour)
+        end = datetime.combine(day, datetime.min.time()).replace(hour=end_hour)
+        if day == today and end <= now:
+            continue
+        slot_options.append(
+            {
+                "label": f"{weekdays_fr[day.weekday()]} {day:%d/%m} · {label}",
+                "start": start,
+                "end": end,
+            }
+        )
+
+if not slot_options:
+    st.info("Aucun créneau à venir n'est disponible dans les données chargées.")
+    st.stop()
+
+default_slot_label = slot_options[0]["label"]
+for option in slot_options:
+    if option["start"] <= now < option["end"]:
+        default_slot_label = option["label"]
+        break
+else:
+    for label, start_hour, end_hour in time_slots:
+        if now.hour < end_hour:
+            current_day_label = f"{weekdays_fr[today.weekday()]} {today:%d/%m} · {label}"
+            if any(option["label"] == current_day_label for option in slot_options):
+                default_slot_label = current_day_label
+            break
+
+selected_slot_label = st.sidebar.pills(
+    "Jour et créneau",
+    options=[option["label"] for option in slot_options],
+    default=default_slot_label,
+)
+if selected_slot_label is None:
+    selected_slot_label = default_slot_label
+
+selected_slot = next(option for option in slot_options if option["label"] == selected_slot_label)
+slot_start = selected_slot["start"]
+slot_end = selected_slot["end"]
+
+st.sidebar.caption(f"Créneau pris en compte : {slot_start:%d/%m/%Y %H:%M} – {slot_end:%H:%M}")
 
 
 # -----------------------------------
 # Carte + classement – page principale
 # -----------------------------------
 
-# Créneau disponible le plus proche de l'heure de référence pour chaque spot.
-df_selected_day = df[df["timestamp"].dt.date == selected_day].copy()
-current_by_spot = df_selected_day.copy()
-current_by_spot["time_distance"] = (current_by_spot["timestamp"] - reference_time).abs()
+# Meilleur créneau disponible dans l'intervalle choisi pour chaque spot.
+df_selected_slot = df[
+    (df["timestamp"] >= slot_start)
+    & (df["timestamp"] < slot_end)
+].copy()
+current_by_spot = df_selected_slot.copy()
 current_by_spot = (
-    current_by_spot.sort_values(["spot_id", "time_distance", "timestamp"])
+    current_by_spot.sort_values(["spot_id", "score", "timestamp"], ascending=[True, False, True])
     .groupby("spot_id")
     .head(1)
 )
@@ -233,7 +290,13 @@ if not current_by_spot.empty:
             "<br/>"
             "<b>Vent</b><br/>"
             "Vitesse: {wind_speed_ms} m/s<br/>"
-            "Direction: {wind_direction_deg}°"
+            "Direction: {wind_direction_deg}°<br/>"
+            "<br/>"
+            "<b>Marée</b><br/>"
+            "Hauteur: {tide_height_m} m<br/>"
+            "État: {tide_state}<br/>"
+            "Prochaine: {next_tide_type} à {next_tide_time}<br/>"
+            "Coefficient: {tide_coefficient}"
         ),
         "style": {"color": "white"},
     }
@@ -246,7 +309,7 @@ if not current_by_spot.empty:
         )
     )
 else:
-    st.info("Aucun spot au-dessus du score minimum pour le créneau actuel.")
+    st.info("Aucun spot au-dessus du score minimum pour ce créneau.")
 
 st.subheader("Classement des spots")
 
@@ -270,6 +333,9 @@ if not current_by_spot.empty:
                 "score",
                 "conditions_label",
                 "timestamp",
+                "tide_state",
+                "next_tide_type",
+                "tide_coefficient",
             ]
         ],
         column_config={
@@ -283,6 +349,9 @@ if not current_by_spot.empty:
             ),
             "conditions_label": st.column_config.TextColumn("Conditions"),
             "timestamp": st.column_config.TextColumn("Créneau"),
+            "tide_state": st.column_config.TextColumn("Marée"),
+            "next_tide_type": st.column_config.TextColumn("Prochaine"),
+            "tide_coefficient": st.column_config.NumberColumn("Coeff."),
         },
         hide_index=True,
         use_container_width=True,
